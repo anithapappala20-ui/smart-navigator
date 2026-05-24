@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Register</title>
+
+    <style>
+        body{
+            margin:0;
+            height:100vh;
+            display:flex;
+            justify-content:center;
+            align-items:center;
+            font-family:Arial;
+
+            background: url("{{ url_for('static', filename='bg.png') }}") no-repeat center center/cover;
+        }
+
+        .register-box{
+            background: rgba(255, 255, 255, 0.15);
+            padding:30px;
+            border-radius:12px;
+            width:320px;
+            text-align:center;
+
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+
+            border: 1px solid rgba(255,255,255,0.3);
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+
+            color: white;
+        }
+
+        .app-title{
+            font-size:24px;
+            margin-bottom:10px;
+            font-weight:bold;
+
+            background: linear-gradient(45deg, #00c6ff, #0072ff);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        h2{
+            margin-bottom:15px;
+        }
+
+        input{
+            width:90%;
+            padding:10px;
+            margin:10px 0;
+            border-radius:6px;
+            border:none;
+
+            background: rgba(255,255,255,0.2);
+            color:white;
+        }
+
+        input::placeholder{
+            color:#eee;
+        }
+
+        button{
+            width:95%;
+            padding:10px;
+            margin-top:10px;
+            border:none;
+            border-radius:6px;
+
+            background: rgba(76,175,80,0.8);
+            color:white;
+            font-size:16px;
+            cursor:pointer;
+        }
+
+        button:hover{
+            background: rgba(76,175,80,1);
+        }
+
+        .login-btn{
+            background: rgba(33,150,243,0.8);
+        }
+
+        .login-btn:hover{
+            background: rgba(33,150,243,1);
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="register-box">
+
+    <h1 class="app-title">Smart Navigation System</h1>
+    <h2>Register</h2>
+
+    <input type="email" id="email" placeholder="Enter Email">
+    <input type="password" id="password" placeholder="Enter Password">
+
+    <button onclick="register()">Register</button>
+
+    <p>Already have an account?</p>
+    <button class="login-btn" onclick="goLogin()">Login</button>
+
+</div>
+
+<script>
+function goLogin(){
+    window.location.href = "/login";
+}
+
+function register(){
+
+    const email = document.getElementById("email").value;
+    const password = document.getElementById("password").value;
+
+    if(!email || !password){
+        alert("Enter email and password");
+        return;
+    }
+
+    if(localStorage.getItem(email)){
+        alert("User already exists");
+        return;
+    }
+
+    const user = {
+        email: email,
+        password: password
+    };
+
+    localStorage.setItem(email, JSON.stringify(user));
+
+    alert("Registration Successful");
+    window.location.href = "/login";
+}
+</script>
+
+</body>
+</html>
