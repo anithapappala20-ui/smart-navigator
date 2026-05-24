@@ -1,0 +1,1014 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Smart Navigation System</title>
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+
+<style>
+body{margin:0;font-family:Arial;background:#f4f4f4;transition:0.3s;}
+#map{height:60vh;width:100%;}
+#panel{background:white;padding:10px;}
+input,button{padding:8px;margin:5px;}
+.vehicleBtn{background:#2196F3;color:white;border:none;border-radius:5px;}
+#chatMessages{height:120px;overflow-y:auto;}
+#steps{max-height:150px;overflow-y:auto;background:#fff;padding:5px;}
+.dark{background:black;color:white;}
+</style>
+</head>
+
+<body>
+
+<div id="panel">
+
+<input id="start" placeholder="Start location">
+<input id="end" placeholder="Destination">
+
+<button onclick="findRoute()">Start Navigation</button>
+<button onclick="goToMyLocation()">My Location</button>
+<button onclick="toggleDarkMode()">🌙</button>
+<button onclick="logout()">Logout</button>
+<button onclick="displayHistory()">History</button>
+<br>
+
+Vehicle:
+<button class="vehicleBtn" onclick="setVehicle('car')">Car</button>
+<button class="vehicleBtn" onclick="setVehicle('bike')">Bike</button>
+<button class="vehicleBtn" onclick="setVehicle('foot')">Walk</button>
+<button class="vehicleBtn" onclick="setVehicle('train')">Train</button>
+<button class="vehicleBtn" onclick="setVehicle('flight')">Flight</button>
+
+<div id="info"></div>
+
+</div>
+
+<div id="map"></div>
+
+<h3>Turn-by-Turn Navigation</h3>
+<div id="steps"></div>
+
+<div>
+<h3>Chatbot</h3>
+<div id="chatMessages"></div>
+
+<input id="chatInput">
+<button onclick="sendMessage()">Send</button>
+<button onclick="startVoice()">🎤</button>
+</div>
+<div id="historySection" style="display:none;">
+    <h3>🧾 Travel History</h3>
+    <div id="history"></div>
+    <button onclick="clearHistory()">Clear History</button>
+</div>
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+<script>
+    // set default user
+if(!localStorage.getItem("user")){
+    localStorage.setItem("user","guest");
+}
+const WEATHER_API_KEY="78a099a6d47bb5aa350510498003f1c2";
+const GRAPH_KEY="a95547e8-6a2b-479e-8391-b347b4724d51";
+
+function formatTime(minutes){
+    minutes = parseFloat(minutes);
+
+    if(minutes < 60){
+        return minutes.toFixed(0) + " min";
+    }
+
+    let hrs = Math.floor(minutes / 60);
+    let mins = Math.round(minutes % 60);
+
+    return hrs + " hr " + mins + " min";
+}
+
+let vehicleType="car";
+let map=L.map('map').setView([17.6868,83.2185],13);
+
+let routeLayer,userMarker,weatherMarker,stationMarker,accuracyCircle;
+let airportMarkers=[];
+let altRoutes=[];   // ✅ ADD THIS HERE (GLOBAL)
+
+let currentLat,currentLon;
+
+let navigationSteps=[];
+let currentStepIndex=0;
+let lastSpokenStep=-1;
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+/* 🌙 DARK MODE */
+function toggleDarkMode(){
+document.body.classList.toggle("dark");
+}
+
+/* 📍 LIVE LOCATION */
+navigator.geolocation.watchPosition(
+    pos => {
+        currentLat = pos.coords.latitude;
+        currentLon = pos.coords.longitude;
+
+        console.log("Location:", currentLat, currentLon, "Accuracy:", pos.coords.accuracy);
+
+        if(!userMarker){
+            userMarker = L.marker([currentLat, currentLon])
+                .addTo(map)
+                .bindPopup("📍 You are here");
+        } else {
+            userMarker.setLatLng([currentLat, currentLon]);
+        }
+
+        if(accuracyCircle) map.removeLayer(accuracyCircle);
+
+        accuracyCircle = L.circle([currentLat, currentLon], {
+            radius: pos.coords.accuracy,
+            color: "blue"
+        }).addTo(map);
+
+        checkNavigation();
+    },
+    err => {
+        alert("Location error: " + err.message);
+    },
+    {
+        enableHighAccuracy: true,   // ✅ VERY IMPORTANT
+        maximumAge: 0,
+        timeout: 10000
+    }
+);
+
+/* 🔊 VOICE */
+function speak(text){
+speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+}
+
+/* 🧭 NAVIGATION */
+function checkNavigation(){
+if(!routeLayer) return;
+
+if(!navigationSteps.length || currentStepIndex>=navigationSteps.length) return;
+
+let step=navigationSteps[currentStepIndex];
+let index=step.interval[0];
+let latlng=routeLayer.getLatLngs()[index];
+
+let dist=getDistance(currentLat,currentLon,latlng.lat,latlng.lng);
+
+/* 100m alert */
+if(dist<0.1 && dist>0.05 && lastSpokenStep!==currentStepIndex){
+if(step.text.includes("left")) speak("In 100 meters turn left");
+else if(step.text.includes("right")) speak("In 100 meters turn right");
+else speak("Continue straight for 100 meters");
+}
+
+/* immediate */
+if(dist<=0.05 && lastSpokenStep!==currentStepIndex){
+if(step.text.includes("left")) speak("Turn left now");
+else if(step.text.includes("right")) speak("Turn right now");
+else speak("Continue straight");
+
+lastSpokenStep=currentStepIndex;
+currentStepIndex++;
+}
+
+/* progress */
+let progress=((currentStepIndex/navigationSteps.length)*100).toFixed(0);
+document.getElementById("info").innerHTML+=`<br>📊 Progress: ${progress}%`;
+
+}
+
+/* 📏 DISTANCE */
+function getDistance(lat1,lon1,lat2,lon2){
+let R=6371;
+let dLat=(lat2-lat1)*Math.PI/180;
+let dLon=(lon2-lon1)*Math.PI/180;
+let a=Math.sin(dLat/2)**2+
+Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*
+Math.sin(dLon/2)**2;
+return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}
+
+/* 🌧️ WEATHER */
+async function getWeather(lat,lon){
+let res=await fetch(`https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}&appid=${WEATHER_API_KEY}&units=metric`);
+let data=await res.json();
+return {temp:data.main.temp,condition:data.weather[0].main,icon:data.weather[0].icon};
+}
+
+async function showWeatherIcon(lat,lon){
+let w=await getWeather(lat,lon);
+
+if(weatherMarker) map.removeLayer(weatherMarker);
+
+let icon=L.icon({
+iconUrl:`https://openweathermap.org/img/wn/${w.icon}.png`,
+iconSize:[50,50]
+});
+
+weatherMarker=L.marker([lat,lon],{icon}).addTo(map)
+.bindPopup(`🌧️ ${w.temp}°C ${w.condition}`);
+}
+
+/* ✈️ AIRPORTS */
+
+    async function getNearestAirport(place){
+
+    // STEP 1: Convert place → coordinates (Nominatim)
+    let geo = await fetch(
+        `https://nominatim.openstreetmap.org/search?format=json&q=${place}`
+    );
+    let gData = await geo.json();
+
+    if(!gData.length){
+        alert("❌ Location not found: " + place);
+        return null;
+    }
+
+    let lat = gData[0].lat;
+    let lon = gData[0].lon;
+
+    // STEP 2: Overpass query (FIXED)
+    let query = `
+    [out:json];
+    (
+      node["aeroway"="aerodrome"](around:100000,${lat},${lon});
+      way["aeroway"="aerodrome"](around:100000,${lat},${lon});
+      relation["aeroway"="aerodrome"](around:100000,${lat},${lon});
+    );
+    out center;
+    `;
+
+    let res;
+
+try {
+    res = await fetch("https://overpass-api.de/api/interpreter", {
+        method: "POST",
+        body: query
+    });
+} catch(err){
+    console.error("Airport API failed:", err);
+    return null;
+}
+    let data = await res.json();
+
+if(!data.elements || data.elements.length === 0){
+     console.warn("No airport found near", place);
+    return null;
+}
+
+// ✅ STEP 1: Filter valid airports
+let airports = data.elements.filter(a => 
+    a.tags &&
+    a.tags.name &&
+    !a.tags.name.toLowerCase().includes("airstrip") &&
+    !a.tags.name.toLowerCase().includes("helipad")
+);
+// ✅ Check if airport name contains searched place (REAL MATCH)
+let exactMatchAirports = airports.filter(a =>
+    a.tags.name.toLowerCase().includes(place.toLowerCase())
+);
+// ✅ STEP: Prefer international airports
+let internationalAirports = airports.filter(a =>
+    a.tags.name.toLowerCase().includes("international")
+);
+
+// ✅ STEP 2: If filter fails, fallback to all
+let list = internationalAirports.length
+    ? internationalAirports
+    : (airports.length ? airports : data.elements);
+    // STEP 3: Pick nearest airport
+    let nearest = list.reduce((best, curr) => {
+
+    let bLat = best.lat || best.center.lat;
+    let bLon = best.lon || best.center.lon;
+
+    let cLat = curr.lat || curr.center.lat;
+    let cLon = curr.lon || curr.center.lon;
+
+    let dBest = getDistance(lat, lon, bLat, bLon);
+    let dCurr = getDistance(lat, lon, cLat, cLon);
+
+    return dCurr < dBest ? curr : best;
+});
+
+    let airportLat = nearest.lat || nearest.center.lat;
+    let airportLon = nearest.lon || nearest.center.lon;
+
+    let searchedPlace = place;
+    // ✅ Check if nearest airport is really inside city (within 50km)
+let cityLat = parseFloat(lat);
+let cityLon = parseFloat(lon);
+
+let distToCity = getDistance(cityLat, cityLon, airportLat, airportLon);
+
+// If airport is within 50km → consider it as exact
+let isExact = distToCity < 50;
+
+return {
+    name: nearest.tags.name 
+       || nearest.tags["name:en"] 
+       || nearest.tags["official_name"] 
+       || "Unknown Airport",
+    lat: airportLat,
+    lon: airportLon,
+    searched: searchedPlace,
+    exactFound: isExact
+};
+}
+/* 🚆 STATION */
+async function getNearestStation(place){
+
+    // 1️⃣ Convert place → coordinates
+    let geo = await fetch(
+        `https://nominatim.openstreetmap.org/search?format=json&q=${place}`
+    );
+    let gData = await geo.json();
+
+    if(!gData.length){
+        alert("❌ Location not found: " + place);
+        return null;
+    }
+
+    let lat = parseFloat(gData[0].lat);
+    let lon = parseFloat(gData[0].lon);
+
+    // 2️⃣ Search nearby railway stations
+    let res = await fetch(
+        `https://nominatim.openstreetmap.org/search?format=json&q=railway station&limit=10&bounded=1&viewbox=${lon-0.5},${lat+0.5},${lon+0.5},${lat-0.5}`
+    );
+
+    let data = await res.json();
+
+    if(!data.length){
+        return null;
+    }
+
+    // 3️⃣ Find nearest station
+    let nearest = data.reduce((best, curr) => {
+        let dBest = getDistance(lat, lon, best.lat, best.lon);
+        let dCurr = getDistance(lat, lon, curr.lat, curr.lon);
+        return dCurr < dBest ? curr : best;
+    });
+
+    let stationLat = parseFloat(nearest.lat);
+    let stationLon = parseFloat(nearest.lon);
+
+    // 4️⃣ Check if station is inside city (within 20km)
+    let dist = getDistance(lat, lon, stationLat, stationLon);
+    let isExact = dist < 5 || nearest.display_name.toLowerCase().includes(place.toLowerCase());
+    return {
+        name: nearest.display_name,
+        lat: stationLat,
+        lon: stationLon,
+        searched: place,
+        exactFound: isExact
+    };
+}
+
+/* 🌍 GEO */
+async function geocode(place){
+let res=await fetch("https://nominatim.openstreetmap.org/search?format=json&q="+place);
+let data=await res.json();
+if(!data.length){alert("Location not found");return null;}
+return [data[0].lat,data[0].lon];
+}
+
+/* 🧠 AI */
+function suggestBestOption(d){
+if(d<2) return "🚶 Walk";
+else if(d<10) return "🏍️ Bike";
+else if(d<300) return "🚗 Car";
+else if(d<800) return "🚆 Train";
+else return "✈️ Flight";
+}
+function estimateTraffic(distance, routeIndex){
+
+    let rand = Math.random();
+    let traffic;
+
+    if(routeIndex === 0){ 
+        if(rand < 0.4) traffic = "High";
+        else if(rand < 0.7) traffic = "Moderate";
+        else traffic = "Low";
+    } 
+    else if(routeIndex === 1){
+        if(rand < 0.3) traffic = "High";
+        else if(rand < 0.6) traffic = "Moderate";
+        else traffic = "Low";
+    } 
+    else {
+        if(rand < 0.2) traffic = "High";
+        else if(rand < 0.5) traffic = "Moderate";
+        else traffic = "Low";
+    }
+
+    return traffic;
+}
+
+/* 🔘 BUTTONS */
+function setVehicle(v){
+    vehicleType = v;
+
+    // Show selected vehicle
+    document.getElementById("info").innerHTML =
+        "🚘 Selected Vehicle: <b>" + v.toUpperCase() + "</b>";
+}
+function goToMyLocation(){map.setView([currentLat,currentLon],15);}
+function logout(){window.location.href="/login";}
+
+function getFlights(distance){
+
+    let flights = [];
+
+    if(distance > 300){
+        flights.push("IndiGo 6E-245");
+        flights.push("Air India AI-512");
+        flights.push("SpiceJet SG-876");
+    }
+    else if(distance > 150){
+        flights.push("IndiGo 6E-101");
+        flights.push("Air India Express IX-332");
+    }
+
+    return flights;
+}
+/* 🚀 MAIN */
+async function findRoute(){
+console.log("Navigation started");
+let s=document.getElementById("start").value.trim();
+let e=document.getElementById("end").value.trim();
+
+if(!s||!e){alert("Enter locations");return;}
+
+let start;
+
+if(s.toLowerCase().includes("current location") || s.toLowerCase().includes("my location")){
+    start = [currentLat, currentLon];
+} else {
+    start = await geocode(s);
+}
+let end=await geocode(e);
+if(!start||!end) return;
+
+/* WEATHER */
+let weather=await getWeather(end[0],end[1]);
+showWeatherIcon(end[0],end[1]);
+
+/* AIRPORTS */
+if(vehicleType === "flight"){
+document.getElementById("info").innerHTML = "✈️ Searching airports...";
+    // ✈️ Get nearest airports
+let startPlace = s.toLowerCase().includes("current") 
+    ? currentLat + "," + currentLon 
+    : s;
+
+let startAirport = await getNearestAirport(startPlace);
+let endAirport = await getNearestAirport(e);
+
+let warningMsg = "";
+// 🚨 POPUP ALERTS
+// 🚨 CLEAR & USER-FRIENDLY POPUP
+if(startAirport && !startAirport.exactFound){
+    alert(
+        "❌ No airport found in " + startAirport.searched +
+        "\n✈️ Using nearest airport: " + startAirport.name
+    );
+}
+
+if(endAirport && !endAirport.exactFound){
+    alert(
+        "❌ No airport found in " + endAirport.searched +
+        "\n✈️ Using nearest airport: " + endAirport.name
+    );
+}
+
+// 🚨 If no exact airport found
+if(startAirport && !startAirport.exactFound){
+    warningMsg += "❌ No airport in " + startAirport.searched +
+                  ", showing nearest airport: <b>" + startAirport.name + "</b><br>";
+}
+
+if(endAirport && !endAirport.exactFound){
+    warningMsg += "❌ No airport in " + endAirport.searched +
+                  ", showing nearest airport: <b>" + endAirport.name + "</b><br>";
+}
+// 🛑 SAFETY CHECK
+if(!startAirport || !endAirport){
+    document.getElementById("info").innerHTML =
+        "❌ Could not find nearby airports.<br>Try a bigger city (e.g., Hyderabad, Delhi).";
+    return;
+}
+
+    // ✅ ADD DEBUG HERE
+    console.log("Start Airport:", startAirport);
+    console.log("End Airport:", endAirport);
+
+    // ❌ If no airports found
+    if(!startAirport || !endAirport){
+        alert("❌ No flights available between these locations");
+        return;
+    }
+
+    // 📏 Distance between airports
+   let d = getDistance(
+    startAirport.lat, startAirport.lon,
+    endAirport.lat, endAirport.lon
+);
+
+let flights = getFlights(d);
+
+    if(d < 150){
+        alert("❌ Distance too short, no flights available");
+        return;
+    }
+
+    // ⏱ Flight time (~800 km/h)
+    let t = (d / 800 * 60).toFixed(2);
+
+    // 💰 Cost estimate
+    let cost = (d * 6).toFixed(2);
+
+    // 🗺 Draw route airport → airport
+    if(routeLayer) map.removeLayer(routeLayer);
+
+    routeLayer = L.polyline([
+        [startAirport.lat, startAirport.lon],
+        [endAirport.lat, endAirport.lon]
+    ], {color:"purple", weight:6}).addTo(map);
+
+    map.fitBounds(routeLayer.getBounds());
+
+    // 📍 Mark airports
+    L.marker([startAirport.lat, startAirport.lon])
+        .addTo(map)
+        .bindPopup("🛫 Start Airport");
+
+    L.marker([endAirport.lat, endAirport.lon])
+        .addTo(map)
+        .bindPopup("🛬 Destination Airport");
+
+    // 💾 Save to DB
+    fetch("/save_travel", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+            username: localStorage.getItem("user") || "guest",
+            start: startAirport.name,
+            destination: endAirport.name,
+            distance: d.toFixed(2),
+            vehicle: "flight",
+            cost: cost
+        })
+    });
+
+   let flightList = flights.length
+    ? flights.join("<br>")
+    : "No direct flights";
+
+// 📺 Output
+document.getElementById("info").innerHTML =
+    warningMsg +
+    "✈️ Flight Route<br>" +
+    "🛫 From: <b>" + startAirport.name + "</b><br>" +
+    "🛬 To: <b>" + endAirport.name + "</b><br>" +
+    "Distance: " + d.toFixed(2) + " km<br>" +
+    "Time: " + formatTime(t) + "<br>"+
+    "Cost: ₹" + cost +
+    "<br><br>🛩 <b>Available Flights:</b><br>" + flightList+
+    "<br><br>"+
+    `<button onclick="openFlightSite()">✈️ Check Full Flight Schedule</button>`;
+
+    return;
+}
+
+/* TRAIN */
+if(vehicleType === "train"){
+
+    let station = await getNearestStation(s);
+
+    if(!station){
+        alert("❌ No railway stations found nearby");
+        return;
+    }
+
+    // 🚨 POPUP if no station in city
+    if(!station.exactFound){
+        alert(
+            "❌ No railway station in " + station.searched +
+            "\n🚆 Nearest: " + station.name
+        );
+    }
+
+    // 📍 Show station on map
+    if(stationMarker) map.removeLayer(stationMarker);
+
+    stationMarker = L.marker([station.lat, station.lon])
+        .addTo(map)
+        .bindPopup("🚆 " + station.name);
+
+    // 📏 Distance + time
+    let d = getDistance(start[0], start[1], end[0], end[1]);
+    let t = (d / 80 * 60).toFixed(2);
+    document.getElementById("info").innerHTML =
+    "🚆 Train Route<br>" +
+    "📍 Station: <b>" + station.name + "</b><br>" +
+    "Distance: " + d.toFixed(2) + " km<br>" +
+    "Time: " + formatTime(t) +
+    "<br><br>" +
+    `<button onclick="openRailwaySite()">🔎 Check Train Schedule</button>` +"<br><br>" +
+
+    `<button onclick="openRailwayBookingSite()" 
+    style="background:#4CAF50;color:white;padding:10px;border:none;border-radius:6px;">
+    🚆 Book Train Ticket
+    </button>` +
+    "<br><br>💡 Tip: Enter station codes like VSKP, HYB";
+
+    return;
+}
+
+/* ROUTE */
+let res = await fetch(
+`https://graphhopper.com/api/1/route?
+point=${start[0]},${start[1]}&
+point=${end[0]},${end[1]}&
+vehicle=${vehicleType}&
+points_encoded=false&
+instructions=true&
+alternative_route.max_paths=3&
+alternative_route.max_weight_factor=1.4&
+alternative_route.max_share_factor=0.6&
+key=${GRAPH_KEY}`
+);
+let data=await res.json();
+console.log("Total routes:", data.paths.length);
+// 🔁 MULTIPLE ROUTES FIX
+let routesData = [];
+
+// Route 1 (original)
+let res1 = await fetch(`https://graphhopper.com/api/1/route?point=${start[0]},${start[1]}&point=${end[0]},${end[1]}&vehicle=${vehicleType}&points_encoded=false&instructions=true&key=${GRAPH_KEY}`);
+let data1 = await res1.json();
+if(data1.paths) routesData.push(data1.paths[0]);
+
+// Route 2 (shift start slightly)
+let res2 = await fetch(`https://graphhopper.com/api/1/route?point=${parseFloat(start[0])+0.05},${parseFloat(start[1])+0.05}&point=${end[0]},${end[1]}&vehicle=${vehicleType}&points_encoded=false&instructions=true&key=${GRAPH_KEY}`);
+let data2 = await res2.json();
+if(data2.paths) routesData.push(data2.paths[0]);
+
+// Route 3 (shift end slightly)
+let res3 = await fetch(`https://graphhopper.com/api/1/route?point=${start[0]},${start[1]}&point=${parseFloat(end[0])+0.05},${parseFloat(end[1])+0.05}&vehicle=${vehicleType}&points_encoded=false&instructions=true&key=${GRAPH_KEY}`);
+let data3 = await res3.json();
+if(data3.paths) routesData.push(data3.paths[0]);
+
+/* CLEAR OLD ROUTES */
+if(routeLayer) map.removeLayer(routeLayer);
+altRoutes.forEach(r => map.removeLayer(r));
+altRoutes = [];
+allRoutes = [];
+
+
+/* ✅ FIND BEST ROUTE (FASTEST) */
+let bestPath = data.paths[0];
+
+data.paths.forEach(p => {
+    if(p.time < bestPath.time){
+        bestPath = p;
+    }
+});
+/* UI START */
+let infoHTML = "<h3>🛣️ Route Options</h3>";
+
+/* DRAW ALL ROUTES */
+routesData.forEach((p, index) => {
+
+    let coords = p.points.coordinates.map(c => [c[1], c[0]]);
+    let isBest = (p === bestPath);
+
+    allRoutes.push({ coords, instructions: p.instructions });
+
+    let d = p.distance / 1000;
+    let speed = vehicleType==="bike"?50:vehicleType==="foot"?5:60;
+    let baseTime = (d / speed * 60);
+
+// 🚦 Traffic
+let traffic = estimateTraffic(d, index);
+
+// ⏱ Adjust time based on traffic
+let multiplier = 1;
+
+if(traffic === "High") multiplier = 1.6;
+else if(traffic === "Moderate") multiplier = 1.3;
+
+let t = (baseTime * multiplier).toFixed(2);
+    let mileage;
+
+if(vehicleType === "car") mileage = 20;      // good cars
+else if(vehicleType === "bike") mileage = 45; // bikes are efficient
+else if(vehicleType === "foot") mileage = Infinity;
+else mileage = 25; // default
+
+let fuel = (vehicleType === "foot" ? 0 : (d / mileage)).toFixed(2);
+    let fuelPrice = 105; // ₹ per litre
+let cost = (fuel * fuelPrice).toFixed(2);
+
+    let line = L.polyline(coords, {
+        color: isBest ? "blue" : "gray",
+        weight: isBest ? 7 : 4,
+        opacity: isBest ? 1 : 0.6
+    }).addTo(map);
+
+    if(isBest){
+        routeLayer = line;
+        navigationSteps = p.instructions;
+        currentStepIndex = 0;
+        lastSpokenStep = -1;
+    } else {
+        altRoutes.push(line);
+    }
+    let trafficColor = 
+    traffic === "High" ? "red" :
+    traffic === "Moderate" ? "orange" : "green";
+
+    infoHTML += `
+<div style="border:1px solid #ccc;padding:8px;margin:8px;">
+    <b>Route ${index+1} ${isBest ? "⭐ (Best)" : ""}</b><br>
+    📏 Distance: ${d.toFixed(2)} km<br>
+    ⏱ Time: ${formatTime(t)}<br>
+
+    🚦 Traffic: <span style="color:${trafficColor}">
+        ${traffic === "High" ? "🔴 High" : 
+          traffic === "Moderate" ? "🟡 Moderate" : "🟢 Low"}
+    </span><br>
+
+    ⛽ Fuel: ${fuel} L<br>
+    💰 Cost: ₹${cost}<br>
+    <button onclick="selectRoute(${index})">🚀 Navigate</button>
+</div>
+`;
+});
+
+/* ADD SUGGESTIONS */
+let bestDistance = bestPath.distance / 1000;
+
+let suggestion = suggestRide(bestDistance);
+let transportSuggestion = suggestBestOption(bestDistance);
+
+let uberFare = estimateUberFare(bestDistance);
+let rapidoFare = estimateRapidoFare(bestDistance);
+
+infoHTML += `
+<br><br><b>🚦 Best Transport:</b> ${transportSuggestion}
+<br><br><b>💡 Suggested Ride:</b> ${suggestion}
+<br><br>🚗 Uber Fare: ₹${uberFare}
+<br>🏍️ Rapido Fare: ₹${rapidoFare}
+
+<br><br>
+<button onclick="openUber()">🚗 Book Uber</button>
+<button onclick="openRapido()">🏍️ Book Rapido</button>
+
+<br><br>🌧️ ${weather.temp}°C ${weather.condition}
+`;
+
+document.getElementById("info").innerHTML = infoHTML;
+
+/* FIT MAP */
+map.fitBounds(routeLayer.getBounds());
+
+}
+/* 🤖 CHATBOT */
+function sendMessage(){
+let input=document.getElementById("chatInput");
+let text=input.value;
+
+if(!text) return;
+
+document.getElementById("chatMessages").innerHTML+="<p>You: "+text+"</p>";
+
+let m = text.match(/(?:from\s+)?(.+?)\s+to\s+(.+)/i);
+
+if(m){
+    let startRaw = m[1].toLowerCase().trim();
+    let endRaw = m[2].toLowerCase().trim();
+
+    let start, end;
+
+
+    // ✅ Handle CURRENT LOCATION
+    if(startRaw.includes("current location") || startRaw.includes("my location")){
+        start = "current location";
+    } else {
+        start = startRaw
+            .replace(/(navigate|go|route|from|please)/gi, "")
+            .trim();
+    }
+
+    // ✅ Clean destination
+    end = endRaw
+        .replace(/(please|now|quickly)/gi, "")
+        .trim();
+
+    console.log("Extracted:", start, "→", end);
+
+    document.getElementById("start").value = start;
+    document.getElementById("end").value = end;
+
+    findRoute();
+}else{
+    document.getElementById("chatMessages").innerHTML += "<p>Bot: Try 'A to B'</p>";
+}
+
+input.value="";
+}
+
+
+/* 🎤 VOICE INPUT */
+function startVoice(){
+let rec=new webkitSpeechRecognition();
+rec.start();
+rec.onresult=e=>{
+document.getElementById("chatInput").value=e.results[0][0].transcript;
+sendMessage();
+};
+}
+async function displayHistory(){
+
+    let section = document.getElementById("historySection");
+    let div = document.getElementById("history");
+
+    // 🔁 TOGGLE (show/hide)
+    if(section.style.display === "block"){
+        section.style.display = "none";
+        return;
+    } else {
+        section.style.display = "block";
+    }
+
+    try{
+        let user = localStorage.getItem("user") || "guest";
+
+        let res = await fetch("/get_travels/" + user);
+        let data = await res.json();
+
+        div.innerHTML = "";
+
+        if(!data || data.length === 0){
+            div.innerHTML = "<p>No travel history</p>";
+            return;
+        }
+
+        data.forEach(h => {
+            div.innerHTML += `
+            <div style="border:1px solid #ccc;padding:10px;margin:8px;">
+                📍 <b>${h.start}</b> ➝ <b>${h.end}</b><br>
+                📏 ${h.distance} km<br>
+                🚘 ${h.vehicle}<br>
+                💰 ₹${h.cost}<br>
+                🕒 ${h.date}
+            </div>
+            `;
+        });
+
+    }catch(err){
+        console.error(err);
+        alert("Error loading history");
+    }
+}
+function clearHistory(){
+    let user = localStorage.getItem("user") || "guest";
+
+    fetch("/clear_travels/" + user, {method:"POST"})
+    .then(()=>displayHistory());
+}
+function suggestRide(distance){
+    if(distance < 15){
+        return "🏍️ Rapido (Best for short distance)";
+    } 
+    else if(distance < 25){
+        return "🚗 Uber (Balanced option)";
+    } 
+    else {
+        return "🚗 Uber (Best for long distance)";
+    }
+}
+function estimateUberFare(distance){
+    return (distance * 12).toFixed(0);
+}
+
+function estimateRapidoFare(distance){
+    return (distance * 6).toFixed(0);
+}
+
+function openUber(){
+
+    let end = document.getElementById("end").value.trim();
+
+    if(!end){
+        alert("Enter destination first");
+        return;
+    }
+
+    let url = `https://m.uber.com/ul/?action=setPickup` +
+              `&dropoff[formatted_address]=${encodeURIComponent(end)}`;
+
+    window.open(url, "_blank");
+}
+function openRapido(){
+    let start = document.getElementById("start").value.trim();
+    let end = document.getElementById("end").value.trim();
+
+    if(!start || !end){
+        alert("Please enter start and destination first");
+        return;
+    }
+
+    // Rapido website redirect
+    let url = "https://www.rapido.bike/";
+
+    window.open(url, "_blank");
+}
+function openRailwaySite(){
+
+    window.open(
+        "https://www.indianrail.gov.in/enquiry/TBIS/TrainBetweenImportantStations.html?locale=en",
+        "_blank"
+    );
+}
+
+function openFlightSite(){
+
+    let start = document.getElementById("start").value.trim();
+    let end = document.getElementById("end").value.trim();
+
+    let url = "https://www.google.com/travel/flights?q=" +
+              encodeURIComponent(start + " to " + end);
+
+    window.open(url, "_blank");
+
+    }
+function selectRoute(index){
+
+    console.log("Selected index:", index);
+    console.log("All routes:", allRoutes);
+
+    let selected = allRoutes[index];
+
+    if(!selected || !selected.coords || selected.coords.length === 0){
+        alert("❌ Route data missing");
+        return;
+    }
+
+    // Remove old route
+    if(routeLayer) map.removeLayer(routeLayer);
+    altRoutes.forEach(r => map.removeLayer(r));
+
+    // Draw new route
+    routeLayer = L.polyline(selected.coords, {
+        color: "blue",
+        weight: 7
+    }).addTo(map);
+
+    // Start navigation
+    navigationSteps = selected.instructions || [];
+    currentStepIndex = 0;
+    lastSpokenStep = -1;
+
+    // Show steps
+    document.getElementById("steps").innerHTML =
+        navigationSteps.map(s => "➡ " + s.text).join("<br>");
+
+    map.fitBounds(routeLayer.getBounds());
+
+    alert("🚀 Navigation Started!");
+    let traffic = estimateTraffic(10, index);
+
+if(traffic === "High"){
+    speak("Heavy traffic ahead. Drive carefully.");
+}
+else if(traffic === "Moderate"){
+    speak("Moderate traffic on this route.");
+}
+else{
+    speak("Low traffic. Smooth ride.");
+}
+}
+function openRailwayBookingSite(){
+
+    let start = document.getElementById("start").value.trim();
+    let end = document.getElementById("end").value.trim();
+
+    if(!start || !end){
+        alert("Enter start and destination");
+        return;
+    }
+
+    // Open IRCTC-like booking (Indian Railways)
+    let url = "https://www.confirmtkt.com/rbooking-d/trains/from/" +
+          encodeURIComponent(start) +
+          "/to/" +
+          encodeURIComponent(end);
+    window.open(url, "_blank");
+}
+</script>
+</body>
+</html>
